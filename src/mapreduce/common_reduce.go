@@ -1,11 +1,10 @@
 package mapreduce
 
 import (
+	"encoding/json"
 	"os"
 	"sort"
-	"encoding/json"
 )
-	
 
 // doReduce manages one reduce task: it reads the intermediate
 // key/value pairs (produced by the map phase) for this task, sorts the
@@ -50,21 +49,21 @@ func doReduce(
 	// }
 	// file.Close()
 	//
-    
-    keyValues := make(map[string][]string, 0)
-	//Read the intermediate file 
-	for i := 0; i < nMap; i++{
+
+	keyValues := make(map[string][]string, 0)
+	//Read the intermediate file
+	for i := 0; i < nMap; i++ {
 		filename := reduceName(jobName, i, reduceTaskNumber)
 		file, _ := os.OpenFile(filename, os.O_RDWR, 0666)
 		dec := json.NewDecoder(file)
 		for {
-		    var v KeyValue
-		    err := dec.Decode(&v)
-		    if err != nil {
-		        break
+			var v KeyValue
+			err := dec.Decode(&v)
+			if err != nil {
+				break
 			}
 			_, ok := keyValues[v.Key]
-			if !ok  {
+			if !ok {
 				keyValues[v.Key] = make([]string, 0)
 			}
 			keyValues[v.Key] = append(keyValues[v.Key], v.Value)
@@ -73,30 +72,28 @@ func doReduce(
 	}
 
 	var keys []string
-	for k, _ := range keyValues{
+	for k, _ := range keyValues {
 		keys = append(keys, k)
 	}
 
 	sort.Strings(keys)
 
 	mergeFileName := mergeName(jobName, reduceTaskNumber)
- 	mergeFile, err := os.Create(mergeFileName)
-    if err != nil {
-        panic(err)
-    }
-    defer mergeFile.Close()
+	mergeFile, err := os.Create(mergeFileName)
+	if err != nil {
+		panic(err)
+	}
+	defer mergeFile.Close()
 
-    enc := json.NewEncoder(mergeFile)
-    for _, key := range keys{
-    	res := reduceF(key, keyValues[key])
-    	err := enc.Encode(&KeyValue{key, res})
-    	if err != nil {
-            panic(err)
-        }
-    }
+	enc := json.NewEncoder(mergeFile)
+	for _, key := range keys {
+		res := reduceF(key, keyValues[key])
+		err := enc.Encode(&KeyValue{key, res})
+		if err != nil {
+			panic(err)
+		}
+	}
 
 	//sort.Sort(ByAgepeople))
-
-
 
 }
