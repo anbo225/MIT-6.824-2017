@@ -9,6 +9,7 @@ import (
 const debugEnabled = false
 
 // debug() will only print if debugEnabled is true
+// a为可变长参数
 func debug(format string, a ...interface{}) (n int, err error) {
 	if debugEnabled {
 		n, err = fmt.Printf(format, a...)

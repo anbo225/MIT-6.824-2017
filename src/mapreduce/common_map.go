@@ -1,8 +1,8 @@
 package mapreduce
 
 import (
-	"hash/fnv"
 	"encoding/json"
+	"hash/fnv"
 	"io/ioutil"
 	"os"
 )
@@ -62,29 +62,29 @@ func doMap(
 	if err != nil{
 		panic(err)
 	}
-	
-	/*     Create nReduce files */
-	files := make([]*os.File,nReduce)
+
+	/*     Create nReduce input files */
+	files := make([]*os.File, nReduce)
 	enc := make([]*json.Encoder, nReduce)
-	for i:=0; i < nReduce; i++{
+	for i := 0; i < nReduce; i++ {
 		filename := reduceName(jobName, mapTaskNumber, i)
-		files[i], _ = os.OpenFile(filename, os.O_RDWR | os.O_CREATE, 0666)
-		enc[i] =  json.NewEncoder(files[i])
+		files[i], _ = os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0666)
+		enc[i] = json.NewEncoder(files[i])
 	}
 
-
 	/*     Use user-defined map Funciont to get key-value pairs */
+	// keyValuePairs is a slice : []KeyValue
 	keyValuePairs := mapF(inFile, string(content))
 
-    /*  Use ihash function to get intermediate partition */
-    for _, value := range keyValuePairs{
-    	enc[ihash(value.Key) % nReduce].Encode(&value)
-    } 
+	/*  Use ihash function to get intermediate partition */
+	for _, value := range keyValuePairs {
+		enc[ihash(value.Key)%nReduce].Encode(&value)
+	}
 
-    /*  close the json Encoder  */
-    for i:=0; i < nReduce; i++{
-    	files[i].Close()
-    }
+	/*  close the json Encoder  */
+	for i := 0; i < nReduce; i++ {
+		files[i].Close()
+	}
 
 }
 
