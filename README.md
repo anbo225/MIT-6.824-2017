@@ -6,13 +6,15 @@ My solution for MIT 6.824 Distributed Systems Class 2017
 
 进度
 ---
-- [ ] Lab 1: MapReduce
+- [x] Lab 1: MapReduce
   - [x] Part 1: Map/Reduce input and output
   - [x] Part II: Single-worker word count
   - [x] Part III: Distributing MapReduce tasks
   - [x] Part IV: Handling worker failures
-  - [ ] Part V: Inverted index generation (optional for extra credit)
+  - [X] Part V: Inverted index generation (optional for extra credit)
 
+---
 
+- Lab 2 : Raft
 
  

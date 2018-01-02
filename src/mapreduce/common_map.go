@@ -59,11 +59,15 @@ func doMap(
 
 	/*          Read the file            */
 	content, err := ioutil.ReadFile(inFile)
-	if err != nil{
+	if err != nil {
 		panic(err)
 	}
 
+<<<<<<< HEAD
 	/*     Create nReduce input files */
+=======
+	/*     Create nReduce files */
+>>>>>>> 597475a6ec36330fd0f9a23fec1c800545560b74
 	files := make([]*os.File, nReduce)
 	enc := make([]*json.Encoder, nReduce)
 	for i := 0; i < nReduce; i++ {
