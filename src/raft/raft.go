@@ -22,10 +22,23 @@ import (
 	"math/rand"
 	"sync"
 	"time"
+
 )
 
 // import "bytes"
 // import "encoding/gob"
+
+
+
+const (
+	FOLLOWER  = 0
+	CANDIDATE = 1
+	LEADER    = 2
+
+	HEARTBEAT_CYCLE   = 200 // 200ms, 5 heartbeat per second
+	ELECTION_MIN_TIME = 400
+	ELECTION_MAX_TIME = 600
+)
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -57,8 +70,9 @@ type Raft struct {
 	voteAcquired int
 
 	heartBeatCh chan struct{}
-	giveVoteCH  chan struct{}
-
+	giveVoteCh  chan struct{}
+	becomeLeaderCh chan struct{}
+	becomeFollowerCh chan struct{}
 	electionTimer *time.Timer
 }
 
@@ -165,7 +179,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if reply.VoteGranted == true {
-		go func() { rf.giveVoteCH <- struct{}{} }()
+		go func() { rf.giveVoteCh <- struct{}{} }()
 	}
 
 }
@@ -218,9 +232,8 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// Your code here (2A, 2B).
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.currentTerm > args.Term {
 		reply.Success = false
 		reply.Term = rf.currentTerm
@@ -228,12 +241,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 		reply.Success = true
 	} else {
-		reply.Success = true
-	}
-	if reply.Success == true {
+		//仅在收到来自当前任期leader发来的心跳时才重置election timeout
 		go func() {
 			rf.heartBeatCh <- struct{}{}
 		}()
+		reply.Success = true
+	}
+	if reply.Success == true {
+
 	}
 
 }
@@ -282,11 +297,15 @@ func (rf *Raft) beginElection() {
 	rf.votedFor = rf.me
 	rf.voteAcquired = 1
 	//rf.mu.Unlock()
-	DPrintf("[Node %d] begin election in term %d\n", rf.me, rf.currentTerm)
+	DPrintf("[Term %d] Node %d begin election\n", rf.currentTerm, rf.me)
+
+	//重置election timeout，candidate开始选举，发送选举必须异步，以免选举时间过长，阻塞其他事件发生
 	rf.resetTimer()
 	rf.broadcastVoteReq()
 }
 
+
+// 异步来发送选举请求
 func (rf *Raft) broadcastVoteReq() {
 	args := RequestVoteArgs{Term: rf.currentTerm, CandidatedId: rf.me}
 	for i, _ := range rf.peers {
@@ -294,24 +313,33 @@ func (rf *Raft) broadcastVoteReq() {
 			continue
 		}
 		go func(server int) {
+			//rf.mu.Lock()
+			//defer rf.mu.Unlock()
+			// **** 在这里上锁将引入concurrency bug，发送一个请求由于网络延迟得不到响应，别的请求都无法发送，导致任何一次选举都无法成功 ****
+
 			var reply RequestVoteReply
-
-			if rf.status == 1 && rf.sendRequestVote(server, &args, &reply) {
-
-				//rf.mu.Lock()
-
-				if reply.VoteGranted == true {
-					DPrintf("[Node %d] receive vote from %d\n", rf.me, server)
-					rf.voteAcquired++
-					//	rf.mu.Unlock()
-				} else {
-					DPrintf("[Node %d] did not receive vote from %d\n", rf.me, server)
-					if reply.Term > rf.currentTerm {
-						rf.currentTerm = reply.Term
-						//		rf.mu.Unlock()
-						rf.updateStateTo(FOLLOWER)
+			if rf.sendRequestVote(server, &args, &reply) {
+				//仅仅在rf.status状态依旧是candidate时才处理返回结果
+				if rf.status == CANDIDATE{
+					if reply.VoteGranted == true {
+						DPrintf("[Node %d] receive vote from %d\n", rf.me, server)
+						rf.mu.Lock()
+						rf.voteAcquired++
+						rf.mu.Unlock()
+						if rf.voteAcquired > len(rf.peers)/2 {
+							DPrintf("In term %d: Node %d get %d\n",
+								rf.currentTerm, rf.me, rf.voteAcquired)
+							rf.becomeLeaderCh <- struct{}{}
+						}
+					} else {
+						DPrintf("[Node %d] did not receive vote from %d\n", rf.me, server)
+						if reply.Term > rf.currentTerm {
+							rf.currentTerm = reply.Term
+							rf.becomeFollowerCh <- struct {}{}
+						}
 					}
 				}
+
 			} else {
 				DPrintf("Server %d send vote req failed.\n", rf.me)
 			}
@@ -319,6 +347,7 @@ func (rf *Raft) broadcastVoteReq() {
 	}
 }
 
+// 异步来发送心跳
 func (rf *Raft) broadcastAppendEntries() {
 	args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me}
 	for i := range rf.peers {
@@ -327,58 +356,43 @@ func (rf *Raft) broadcastAppendEntries() {
 		}
 		go func(server int) {
 			var reply AppendEntriesReply
-			if rf.status == 2 && rf.sendAppendEntries(server, &args, &reply) {
-				//	rf.mu.Lock()
-				//	defer rf.mu.Unlock()
+			DPrintf("node %d broadcast heartBeat to %d \n", rf.me, server)
+			if rf.sendAppendEntries(server, &args, &reply) && rf.status == LEADER {
 				if reply.Success == true {
 
 				} else {
 					if reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
-						rf.updateStateTo(FOLLOWER)
+						rf.becomeFollowerCh <- struct{}{}
 					}
 				}
 			}
-			DPrintf("node %d broadcast heartBeat to %d \n", rf.me, server)
+
 		}(i)
 	}
 }
 
-const (
-	FOLLOWER  = 0
-	CANDIDATE = 1
-	LEADER    = 2
-)
+
 
 func (rf *Raft) updateStateTo(state int) {
 	// should always been protected by lock
-
 	stateDesc := []string{"FOLLOWER", "CANDIDATE", "LEADER"}
 	preState := rf.status
-
 	switch state {
 	case FOLLOWER:
-		rf.mu.Lock()
 		rf.status = FOLLOWER
 		rf.votedFor = -1    // prepare for next election
 		rf.voteAcquired = 0 // prepare for next election
-		rf.mu.Unlock()
-		rf.resetTimer()
-		DPrintf("[Node %d]: In term %d:  transfer from %s to %s\n",
-			rf.me, rf.currentTerm, stateDesc[preState], stateDesc[rf.status])
+		DPrintf("[Term %d]: Node %d:  transfer from %s to %s\n",
+			rf.currentTerm, rf.me, stateDesc[preState], stateDesc[rf.status])
 	case CANDIDATE:
-		rf.mu.Lock()
 		rf.status = CANDIDATE
-		rf.mu.Unlock()
-		DPrintf("[Node %d]: In term %d:  transfer from %s to %s\n",
-			rf.me, rf.currentTerm, stateDesc[preState], stateDesc[rf.status])
-		rf.beginElection()
+		DPrintf("[Term %d]: Node %d:  transfer from %s to %s\n",
+			rf.currentTerm, rf.me, stateDesc[preState], stateDesc[rf.status])
 	case LEADER:
-		rf.mu.Lock()
 		rf.status = LEADER
-		rf.mu.Unlock()
-		DPrintf("[Node %d]: In term %d:  transfer from %s to %s\n",
-			rf.me, rf.currentTerm, stateDesc[preState], stateDesc[rf.status])
+		DPrintf("[Term %d]: Node %d:  transfer from %s to %s\n",
+			rf.currentTerm, rf.me, stateDesc[preState], stateDesc[rf.status])
 	default:
 		DPrintf("Warning: invalid state %d, do nothing.\n", state)
 	}
@@ -387,11 +401,76 @@ func (rf *Raft) updateStateTo(state int) {
 
 func (rf *Raft) resetTimer() {
 	//rf.mu.Lock()
-	//	defer rf.mu.Unlock()
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	duration := (600 + r.Intn(1000)) * 1000000
+	//defer rf.mu.Unlock()
+
+	duration := rf.getElectionTimeout()
+
 	DPrintf("[Node %d]: In term %d reset election timeout %d ms\n", rf.me, rf.currentTerm, duration/1000000)
 	rf.electionTimer.Reset(time.Duration(duration))
+}
+
+
+
+func (rf *Raft) getElectionTimeout() time.Duration{
+	duration:= time.Duration( ELECTION_MIN_TIME+ rand.Int63n(ELECTION_MAX_TIME-ELECTION_MIN_TIME)) * time.Millisecond
+	return duration
+}
+
+
+
+func (rf *Raft) loop(){
+	stateDesc := []string{"FOLLOWER", "CANDIDATE", "LEADER"}
+	for {
+		switch rf.status {
+		//
+		// Follower只有做了下面任一事件时，
+		//   1.  *投票给别人*
+		//   2.  *收到来自当前leader的心跳*
+		// 才会重置选举时间
+		//
+		case FOLLOWER:
+			rf.resetTimer()
+			select {
+			case <-rf.giveVoteCh:      //Follower投票给Candidate才会收到 giveVoteCh（从选举处理函数发出信号）
+			case <-rf.heartBeatCh:     //Follower收到有效leader心跳才会收到 heartBeatCh（从心跳处理函数发出信号）
+			case <-rf.electionTimer.C:
+				rf.updateStateTo(CANDIDATE)
+			}
+
+		case CANDIDATE:
+			rf.beginElection()
+			select {
+			case <-rf.heartBeatCh:   //这个chanel ： candidate收到有效Leader发送的心跳时，及从在心跳处理函数发生
+				DPrintf("[Node %d]: status [%s] reveive heartBeat，reset election timer\n", rf.me, stateDesc[rf.status])
+				rf.updateStateTo(FOLLOWER)
+			case <-rf.electionTimer.C:
+				rf.beginElection()
+			case <- rf.becomeFollowerCh:  // 这个chanel：candidate异步发出选举请求后，有节点返回term比它大，及在选举结果处理函数发生
+				rf.updateStateTo(FOLLOWER)
+			case <- rf.becomeLeaderCh:
+				rf.updateStateTo(LEADER)
+			}
+
+		case LEADER:
+			broadtimeout := time.NewTimer(HEARTBEAT_CYCLE * time.Millisecond)
+			rf.broadcastAppendEntries()
+			select {
+			case <-rf.heartBeatCh:
+				DPrintf("[Node %d]: status [%s] reveive heartBeat，reset election timer\n", rf.me, stateDesc[rf.status])
+				rf.updateStateTo(FOLLOWER)
+			case <- rf.becomeFollowerCh:  // 这个chanel：candidate异步发出选举请求后，有节点返回term比它大，及在选举结果处理函数发生
+				rf.updateStateTo(FOLLOWER)
+			case <-rf.giveVoteCh:
+			case <-broadtimeout.C:
+
+
+
+			}
+
+
+		}
+
+	}
 }
 
 //
@@ -412,65 +491,24 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.votedFor = -1
-	rf.voteAcquired = 0
-	rf.status = 0
+	rf.status = FOLLOWER
 	rf.currentTerm = 0
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	duration := time.Duration((600 + r.Intn(1000)) * 1000000)
+
+	//TODO: 学习Go time包中定时器的使用
+	duration := rf.getElectionTimeout()
 	rf.electionTimer = time.NewTimer(duration)
-	rf.giveVoteCH = make(chan struct{}, 1)
+
+	rf.giveVoteCh = make(chan struct{}, 1)
 	rf.heartBeatCh = make(chan struct{}, 1)
-	stateDesc := []string{"FOLLOWER", "CANDIDATE", "LEADER"}
+	rf.becomeLeaderCh = make(chan struct{},1)
+	rf.becomeFollowerCh = make(chan struct{},1)
+
 	// Your initialization code here (2A, 2B, 2C).
-	go func() {
-		for {
-			switch rf.status {
-			case 0:
-				select {
-				case <-rf.giveVoteCH:
-					rf.resetTimer()
-				case <-rf.heartBeatCh:
-					rf.resetTimer()
-				case <-rf.electionTimer.C:
-					// rf.mu.Lock()
-					rf.updateStateTo(CANDIDATE)
-					// rf.mu.Unlock()
-				}
 
-			case 1:
-				select {
-				case <-rf.heartBeatCh:
-					DPrintf("[Node %d]: status [%s] reveive heartBeat，reset election timer\n", rf.me, stateDesc[rf.status])
-					rf.updateStateTo(FOLLOWER)
-				case <-rf.electionTimer.C:
-					rf.beginElection()
-				default:
-					// DPrintf("In term %d: server %d get %d\n",
-					// 	rf.currentTerm, rf.me, rf.voteAcquired)
-					if rf.voteAcquired > len(rf.peers)/2 {
-						DPrintf("In term %d: server %d get %d\n",
-							rf.currentTerm, rf.me, rf.voteAcquired)
-						rf.updateStateTo(LEADER)
-					}
-				}
-
-			case 2:
-				// rf.mu.Lock()
-				broadtimeout := time.NewTimer(150 * time.Millisecond)
-				select {
-				case <-rf.heartBeatCh:
-					DPrintf("[Node %d]: status [%s] reveive heartBeat，reset election timer\n", rf.me, stateDesc[rf.status])
-					rf.updateStateTo(FOLLOWER)
-				case <-broadtimeout.C:
-					rf.broadcastAppendEntries()
-				default:
-				}
-
-				// rf.mu.Unlock()
-			}
-
-		}
+	go func(){
+		rf.loop()
 	}()
+
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
