@@ -85,7 +85,7 @@ type Raft struct {
 	becomeFollowerCh chan struct{}
 	revCommand       chan struct{}
 	stop             chan struct{}
-	stateChangeCh  chan struct{}
+	stateChangeCh    chan struct{}
 	electionTimer    *time.Timer
 
 	applyCh chan ApplyMsg
@@ -185,9 +185,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		//妈的咋突然少了段代码~~ 这里要变为follower状态
 		//var wg sync.WaitGroup
 		//wg.Add(1)
-		go func(){
-		//	defer wg.Done()
-			rf.stateChangeCh<- struct{}{}
+		go func() {
+			//	defer wg.Done()
+			rf.stateChangeCh <- struct{}{}
 		}()
 		//wg.Wait()
 
@@ -197,7 +197,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	//此处if 在 currentTerm < args.Term下必然成立，在currentTerm等于args.Term下不一定成立
 
-	if rf.votedFor == -1 || rf.votedFor == args.CandidatedId  {
+	if rf.votedFor == -1 || rf.votedFor == args.CandidatedId {
 		//if candidate的log 至少 as up-to-date as reveiver's log
 		lastLogIndex := len(rf.logEntries) - 1
 		//fmt.Println(lastLogIndex,rf.me,rf.logEntries )
@@ -207,26 +207,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.votedFor = args.CandidatedId
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
-			fmt.Printf("[Term %d],Node %d Reply 值为%v. Term= %d , lastIndex = %d <= args.lastLogIndex %d\n",rf.currentTerm,rf.me,reply, args.LastLogTerm,lastLogIndex,args.LastLogIndex)
+			fmt.Printf("[Term %d],Node %d Reply 值为%v. Term= %d , lastIndex = %d <= args.lastLogIndex %d\n", rf.currentTerm, rf.me, reply, args.LastLogTerm, lastLogIndex, args.LastLogIndex)
 			if rf.status == FOLLOWER {
 				go func() { rf.giveVoteCh <- struct{}{} }()
 			}
 			return
 		}
-		fmt.Println(lastLogIndex,lastLogTerm , args.LastLogIndex,args.LastLogTerm)
+		fmt.Println(lastLogIndex, lastLogTerm, args.LastLogIndex, args.LastLogTerm)
 	}
 
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
-	fmt.Printf("[Term %d] Node %d Reply 值为%v,rf.votefor=%d,\n",rf.currentTerm,rf.me,reply,rf.votedFor)
-
+	fmt.Printf("[Term %d] Node %d Reply 值为%v,rf.votefor=%d,\n", rf.currentTerm, rf.me, reply, rf.votedFor)
 
 }
 
 // 异步来发送选举请求
 func (rf *Raft) broadcastVoteReq() {
 
-	for i  := range rf.peers {
+	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
@@ -265,7 +264,8 @@ func (rf *Raft) broadcastVoteReq() {
 						if rf.voteAcquired > len(rf.peers)/2 && rf.status != LEADER {
 							DPrintf("In term %d: Node %d get %d\n",
 								rf.currentTerm, rf.me, rf.voteAcquired)
-							rf.becomeLeaderCh <- struct{}{}
+							rf.updateStateTo(LEADER)
+							rf.stateChangeCh<- struct{}{}
 						}
 					} else {
 						DPrintf("[Node %d] did not receive vote from %d\n", rf.me, server)
@@ -340,10 +340,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
-	}
-
-	if rf.currentTerm < args.Term {
+	} else if rf.currentTerm < args.Term {
 		rf.currentTerm = args.Term
+		rf.updateStateTo(FOLLOWER)
+		go func() {
+			rf.stateChangeCh <- struct{}{}
+		}()
 		//此处不需要下面这段逻辑的原因是：leader或者candidate收到有效heartbeat都会变为follower
 		//if rf.status != FOLLOWER {
 		//	go func() { rf.becomeFollowerCh <-struct{}{}}()
@@ -354,13 +356,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	//PS:把这段代码放在最后会导致bug，因为如果当前节点log entries没有arg.PrevLogIndex数据，则直接返回false，会导致server不做出收到心跳后的正确反应
 	//收到来自有效leader的心跳
-	var wg sync.WaitGroup
-	wg.Add(1)
+	//var wg sync.WaitGroup
+	//wg.Add(1)
+	//go func() {
+	//	defer wg.Done()
+	//	rf.heartBeatCh <- struct{}{}
+	//}()
+	//wg.Wait()
+
+	//收到了有效的heartbeat，只要term比当前节点高，都可以认为是有效的heartbeat
 	go func() {
-		defer wg.Done()
 		rf.heartBeatCh <- struct{}{}
 	}()
-	wg.Wait()
 
 	//如果当前节点log entries没有arg.PrevLogIndex数据，则直接返回false
 	if args.PrevLogIndex > len(rf.logEntries)-1 {
@@ -377,9 +384,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			return
 		} else {
 			//term一致,删除之后不一样的内容，加入entries
+
 			reply.Success = true
 			reply.Term = rf.currentTerm
-
 			//
 			// 这样直接将log加入会引入bug，比如新的请求比旧的先来且二者都是合法的，旧的请求会覆盖新的请求，导致新请求部分数据丢失
 			// rf.logEntries = append(rf.logEntries[:args.PrevLogIndex+1] , args.Entries...)
@@ -390,6 +397,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			//
 			//	}
 			//}
+
+
 			for i, _ := range args.Entries {
 				//先判断rf.logEntries在 PrevLogIndx + i + 1 的位置是否有值，如有，是否相同
 				pos := args.PrevLogIndex + i + 1 //当前args.entrise要写入的位置
@@ -403,6 +412,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					break
 				}
 			}
+
 
 			//更新当前节点的commit index
 			if args.LeaderCommit > rf.commitIndex {
@@ -558,12 +568,15 @@ func (rf *Raft) broadcastAppendEntries() {
 					return
 				} else if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
-					rf.becomeFollowerCh <- struct{}{}
+					rf.updateStateTo(FOLLOWER)
+					//go func(){
+						rf.stateChangeCh <- struct{}{}
+					//}()
 					return
 				} else if reply.Success == true {
 					//BUG : 此处用 f.nextIndex[server] += len(arg.entries) 会引入bug？比如2次发送同样的请求会导致加2次，要保证RPC的幂等性
 					rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
-					rf.matchIndex[server] = rf.nextIndex[server] - 1
+					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 					//	fmt.Printf("master更新 %d 节点 nextIndex 和 matchIndex为 %d,%d\n",server,rf.nextIndex[server],rf.matchIndex[server])
 
 				} else {
@@ -661,7 +674,7 @@ func (rf *Raft) updateStateTo(state int) {
 		rf.votedFor = -1    // prepare for next election
 		rf.voteAcquired = 0 // prepare for next election
 		DPrintf("[Term %d]: Node %d:  transfer from %s to %s,votefor = %d\n",
-			rf.currentTerm, rf.me, stateDesc[preState], stateDesc[rf.status],rf.votedFor)
+			rf.currentTerm, rf.me, stateDesc[preState], stateDesc[rf.status], rf.votedFor)
 	case CANDIDATE:
 		rf.status = CANDIDATE
 		DPrintf("[Term %d]: Node %d:  transfer from %s to %s\n",
@@ -736,9 +749,11 @@ func (rf *Raft) loop() {
 				rf.beginElection()
 			case <-rf.becomeFollowerCh: // 这个chanel：candidate异步发出选举请求后，有节点返回term比它大，及在选举结果处理函数发生
 				rf.updateStateTo(FOLLOWER)
+
+			case <-rf.stateChangeCh:
 			case <-rf.becomeLeaderCh:
 				rf.updateStateTo(LEADER)
-				case<-rf.stateChangeCh:
+
 			case <-rf.stop:
 				stop = true
 			}
