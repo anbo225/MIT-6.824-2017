@@ -18,11 +18,11 @@ package raft
 //
 
 import (
-	"fmt"
 	"labrpc"
 	"math/rand"
 	"sync"
 	"time"
+	"fmt"
 )
 
 // import "bytes"
@@ -81,8 +81,7 @@ type Raft struct {
 
 	heartBeatCh      chan struct{}
 	giveVoteCh       chan struct{}
-	becomeLeaderCh   chan struct{}
-	becomeFollowerCh chan struct{}
+
 	revCommand       chan struct{}
 	stop             chan struct{}
 	stateChangeCh    chan struct{}
@@ -180,7 +179,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if rf.currentTerm < args.Term {
 		rf.currentTerm = args.Term
-
 		rf.updateStateTo(FOLLOWER)
 		//妈的咋突然少了段代码~~ 这里要变为follower状态
 		//var wg sync.WaitGroup
@@ -189,6 +187,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			//	defer wg.Done()
 			rf.stateChangeCh <- struct{}{}
 		}()
+
 		//wg.Wait()
 
 		//直接return，等待下一轮投票会导致活锁，比如node 1 ，2，3 。 node 1 加term为2，发请求给node2，3，term1。 node2，3更新term拒绝投票
@@ -207,7 +206,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.votedFor = args.CandidatedId
 			reply.Term = rf.currentTerm
 			reply.VoteGranted = true
-			fmt.Printf("[Term %d],Node %d Reply 值为%v. Term= %d , lastIndex = %d <= args.lastLogIndex %d\n", rf.currentTerm, rf.me, reply, args.LastLogTerm, lastLogIndex, args.LastLogIndex)
+			//fmt.Printf("[Term %d],Node %d Reply 值为%v. Term= %d , lastIndex = %d <= args.lastLogIndex %d\n", rf.currentTerm, rf.me, reply, args.LastLogTerm, lastLogIndex, args.LastLogIndex)
 			if rf.status == FOLLOWER {
 				go func() { rf.giveVoteCh <- struct{}{} }()
 			}
@@ -218,12 +217,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
-	fmt.Printf("[Term %d] Node %d Reply 值为%v,rf.votefor=%d,\n", rf.currentTerm, rf.me, reply, rf.votedFor)
+	//fmt.Printf("[Term %d] Node %d Reply 值为%v,rf.votefor=%d,\n", rf.currentTerm, rf.me, reply, rf.votedFor)
 
 }
 
 // 异步来发送选举请求
 func (rf *Raft) broadcastVoteReq() {
+
+	args := RequestVoteArgs{}
+	args.Term = rf.currentTerm
+	args.CandidatedId = rf.me
+	args.LastLogIndex = len(rf.logEntries) - 1
+	args.LastLogTerm = rf.logEntries[args.LastLogIndex].Term
 
 	for i := range rf.peers {
 		if i == rf.me {
@@ -231,28 +236,23 @@ func (rf *Raft) broadcastVoteReq() {
 		}
 
 		go func(server int) {
-			args := RequestVoteArgs{}
-			args.Term = rf.currentTerm
-			args.CandidatedId = rf.me
-			args.LastLogIndex = len(rf.logEntries) - 1
-			args.LastLogTerm = rf.logEntries[args.LastLogIndex].Term
-
 			//rf.mu.Lock()
 			//defer rf.mu.Unlock()
 			// **** 在这里上锁将引入concurrency bug，发送一个请求由于网络延迟得不到响应，别的请求都无法发送，导致任何一次选举都无法成功 ****
 			reply := RequestVoteReply{}
-			DPrintf("[Term %d]: Node %d issues request vote to %d \n",
-				rf.currentTerm, rf.me, server)
-			if rf.sendRequestVote(server, &args, &reply) && rf.status == CANDIDATE {
+			DPrintf("[Term %d]: Node %d issues request vote to %d \n", rf.currentTerm, rf.me, server)
+			if rf.status == CANDIDATE &&rf.sendRequestVote(server, &args, &reply)   {
 				DPrintf("[Term %d]: Node %d issues 开始判断投票返回结果 to %d \n",
 					rf.currentTerm, rf.me, server)
 				//TODO : 应该判断收到的response的term，不搭理旧term的返回结果
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
-					rf.becomeFollowerCh <- struct{}{}
+					rf.updateStateTo(FOLLOWER)
+					rf.stateChangeCh <- struct{}{}
 					fmt.Println("请求投票的return term更大")
+					return
 				} else if reply.Term < rf.currentTerm {
-					fmt.Println(reply.Term)
+
 					DPrintf("[Term %d]: 旧%d返回值，不理会\n", rf.currentTerm, reply.Term)
 					return
 				} else {
@@ -269,7 +269,6 @@ func (rf *Raft) broadcastVoteReq() {
 						}
 					} else {
 						DPrintf("[Node %d] did not receive vote from %d\n", rf.me, server)
-
 					}
 				}
 			} else {
@@ -327,6 +326,7 @@ type AppendEntriesReply struct {
 	// Your data here (2A).
 	Term    int
 	Success bool
+	NextTrial int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -373,6 +373,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex > len(rf.logEntries)-1 {
 		reply.Success = false
 		reply.Term = rf.currentTerm
+		reply.NextTrial = len(rf.logEntries)
 		return
 	} else {
 		//比较当前节点log entries中的term是否与 arg中一致
@@ -381,6 +382,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			//term不一致
 			reply.Success = false
 			reply.Term = rf.currentTerm
+			//优化，避免 TestBackup2B 由于reject 太多，导致超时测试失败
+
+			ii := args.PrevLogIndex
+			for ; rf.logEntries[ii].Term == preLogTerm; ii-- {
+
+			}
+			reply.NextTrial = ii + 1
 			return
 		} else {
 			//term一致,删除之后不一样的内容，加入entries
@@ -397,7 +405,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			//
 			//	}
 			//}
-
 
 			for i, _ := range args.Entries {
 				//先判断rf.logEntries在 PrevLogIndx + i + 1 的位置是否有值，如有，是否相同
@@ -557,40 +564,33 @@ func (rf *Raft) broadcastAppendEntries() {
 
 			if len(rf.logEntries) > rf.nextIndex[server] {
 				args.Entries = rf.logEntries[rf.nextIndex[server]:]
+				DPrintf("[Term %d] Node %d 传输新log to %d, args : %v\n", rf.currentTerm, rf.me, server, args)
 			}
 
-			DPrintf("[Term %d] Node %d broadcast heartBeat to %d, args : %v\n", rf.currentTerm, rf.me, server, args)
-
+			//DPrintf("[Term %d] Node %d broadcast heartBeat to %d, args : %v\n", rf.currentTerm, rf.me, server, args)
 			var reply AppendEntriesReply
-			if rf.sendAppendEntries(server, &args, &reply) && rf.status == LEADER {
+			if rf.status == LEADER && rf.sendAppendEntries(server, &args, &reply)   {
 				//TODO : 应该判断收到的response的term，不搭理旧term的返回结果
 				if reply.Term < rf.currentTerm {
 					return
 				} else if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
 					rf.updateStateTo(FOLLOWER)
-					//go func(){
-						rf.stateChangeCh <- struct{}{}
-					//}()
+					rf.stateChangeCh <- struct{}{}
 					return
-				} else if reply.Success == true {
-					//BUG : 此处用 f.nextIndex[server] += len(arg.entries) 会引入bug？比如2次发送同样的请求会导致加2次，要保证RPC的幂等性
-					rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
-					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-					//	fmt.Printf("master更新 %d 节点 nextIndex 和 matchIndex为 %d,%d\n",server,rf.nextIndex[server],rf.matchIndex[server])
+				} else{
+					if reply.Success == true {
+						//BUG : 此处用 f.nextIndex[server] += len(arg.entries) 会引入bug？比如2次发送同样的请求会导致加2次，要保证RPC的幂等性
+						rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
+						rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+						//	fmt.Printf("master更新 %d 节点 nextIndex 和 matchIndex为 %d,%d\n",server,rf.nextIndex[server],rf.matchIndex[server])
 
-				} else {
-					// 重设相关变量
-					//if rf.nextIndex[server] == 1{
-					//	fmt.Println(args.PrevLogIndex,args.PrevLogTerm)
-					//}
-					rf.nextIndex[server] = args.PrevLogIndex
+					} else {
+						// 重设相关变量
+						rf.nextIndex[server] = reply.NextTrial
+					}
 				}
-
-				//在此处加入设置commitIndex的逻辑代码
-
 			}
-
 		}(i)
 	}
 }
@@ -646,7 +646,6 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 
 	go func() {
-		fmt.Println("kill调用")
 		rf.stop <- struct{}{}
 	}()
 }
@@ -716,7 +715,6 @@ func (rf *Raft) loop() {
 	stop := false
 	for {
 		if stop {
-			fmt.Println("loop已停止")
 			break
 		}
 		switch rf.status {
@@ -747,12 +745,8 @@ func (rf *Raft) loop() {
 				rf.updateStateTo(FOLLOWER)
 			case <-rf.electionTimer.C:
 				rf.beginElection()
-			case <-rf.becomeFollowerCh: // 这个chanel：candidate异步发出选举请求后，有节点返回term比它大，及在选举结果处理函数发生
-				rf.updateStateTo(FOLLOWER)
 
 			case <-rf.stateChangeCh:
-			case <-rf.becomeLeaderCh:
-				rf.updateStateTo(LEADER)
 
 			case <-rf.stop:
 				stop = true
@@ -764,8 +758,6 @@ func (rf *Raft) loop() {
 			select {
 			case <-rf.heartBeatCh:
 				//DPrintf("[Node %d]: status [%s] reveive heartBeat，reset election timer\n", rf.me, stateDesc[rf.status])
-				rf.updateStateTo(FOLLOWER)
-			case <-rf.becomeFollowerCh: // 这个chanel：candidate异步发出选举请求后，有节点返回term比它大，及在选举结果处理函数发生
 				rf.updateStateTo(FOLLOWER)
 			//case <-rf.giveVoteCh:
 			//
@@ -808,7 +800,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//为了高可用需要存储在稳定介质中的数据
 	rf.votedFor = -1
 	rf.status = FOLLOWER
-	fmt.Printf("新建一个raft状态为 , %d", rf.status)
 	rf.currentTerm = 0
 	rf.logEntries = make([]LogEntry, 0, 10)
 	rf.logEntries = append(rf.logEntries, LogEntry{Term: 0})
@@ -830,8 +821,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.giveVoteCh = make(chan struct{}, 1)
 	rf.heartBeatCh = make(chan struct{}, 1)
-	rf.becomeLeaderCh = make(chan struct{}, 1)
-	rf.becomeFollowerCh = make(chan struct{}, 1)
+
 	rf.revCommand = make(chan struct{}, 1) //TODO:此处是否需要使用有缓存的channel
 	rf.stop = make(chan struct{}, 1)
 	rf.stateChangeCh = make(chan struct{}, 1)
