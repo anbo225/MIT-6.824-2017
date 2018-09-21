@@ -268,7 +268,7 @@ func (rf *Raft) broadcastVoteReq() {
 							rf.stateChangeCh<- struct{}{}
 						}
 					} else {
-						DPrintf("[Node %d] did not receive vote from %d\n", rf.me, server)
+						DPrintf("[Term %d] Node %d did not receive vote from %d\n", rf.currentTerm, rf.me, server)
 					}
 				}
 			} else {
