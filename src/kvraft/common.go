@@ -3,6 +3,7 @@ package raftkv
 const (
 	OK       = "OK"
 	ErrNoKey = "ErrNoKey"
+	ErrTimeOut = "ErrorTimeOut"
 	CommandTimeout = 1000
 	Get            = "Get"
 	Put            = "Put"

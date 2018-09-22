@@ -50,7 +50,7 @@ func (ck *Clerk) Get(key string) string {
 	args := GetArgs{
 		Key:      key,
 		ClientID: ck.clientId,
-		SeqID:      ck.getAndIncSeq(),
+		SeqID:    ck.getAndIncSeq(),
 	}
 	var i int
 
@@ -68,6 +68,8 @@ func (ck *Clerk) Get(key string) string {
 		}
 
 		ck.setPossibleLeader(i)
+		DPrintf("[Client %d , Seq %d, leader %d] Get %s : %s", ck.clientId, ck.seqId, i, key, reply.Value)
+
 		return reply.Value
 	}
 
@@ -107,9 +109,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			continue
 		}
 		if op == Put {
-			DPrintf("Put %s : %s" ,key, value)
+			DPrintf("[Client %d , Seq %d, leader %d] Put %s : %s", ck.clientId, ck.seqId, i, key, value)
 		}else{
-			DPrintf("Append %s : %s" ,key, value)
+			DPrintf("[Client %d , Seq %d, leader %d ] Append %s : %s", ck.clientId, ck.seqId, i, key, value)
 		}
 		ck.setPossibleLeader(i)
 		return

@@ -7,10 +7,9 @@ import (
 	"raft"
 	"sync"
 	"time"
-	"fmt"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -32,6 +31,11 @@ type Op struct {
 	Term       int
 }
 
+type LatestReply struct {
+	Seq   int      // latest request
+	Reply GetReply // latest reply
+}
+
 type RaftKV struct {
 	mu      sync.Mutex
 	me      int
@@ -42,7 +46,8 @@ type RaftKV struct {
 
 	// Your definitions here.
 	database  map[string]string
-	clientSeq map[int64]int
+	clientSeq map[int64]*LatestReply
+	//clientSeq map[int64]int
 	opDone    map[int]chan Op
 
 	done bool
@@ -51,24 +56,48 @@ type RaftKV struct {
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	//kv.mu.Lock()
+
+	if dup, ok := kv.clientSeq[args.ClientID]; ok {
+		// filter duplicate
+		if args.SeqID <= dup.Seq {
+			reply.WrongLeader = false
+			reply.Err = OK
+			reply.Value = dup.Reply.Value
+			return
+		}
+	}
+
 	if index, term, isLeader := kv.rf.Start(kv.GetCommand(args)); !isLeader {
 		reply.WrongLeader = true
+		//kv.mu.Unlock()
 	} else {
-		kv.mu.Lock()
 		done := kv.getOpFromMap(index)
-		kv.mu.Unlock()
+		//kv.mu.Unlock()
 		select {
 		case op := <-done:
 			reply.WrongLeader = op.Term != term
 			reply.Value = op.Value
 			reply.Err = OK
 		case <-time.After(CommandTimeout * time.Millisecond):
+			reply.Err = ErrTimeOut
 		}
 	}
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+
+	if dup, ok := kv.clientSeq[args.ClientID]; ok {
+		// filter duplicate
+		if args.SeqID <= dup.Seq {
+			reply.WrongLeader = false
+			reply.Err = OK
+
+			return
+		}
+	}
+
 	if index, term, isLeader := kv.rf.Start(kv.PutAppendCommand(args)); !isLeader{
 		reply.WrongLeader = true
 	}else{
@@ -80,6 +109,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			reply.WrongLeader = op.Term != term
 			reply.Err = OK
 		case <-time.After(CommandTimeout * time.Millisecond):
+			reply.Err = ErrTimeOut
 		}
 	}
 }
@@ -156,7 +186,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.database = make(map[string]string)
-	kv.clientSeq = make(map[int64]int)
+	kv.clientSeq = make(map[int64]*LatestReply)
 	kv.opDone = make(map[int]chan Op)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
@@ -175,19 +205,27 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			//kv.mu.Lock()
 			done := kv.getOpFromMap(index)
 
-			if seq, ok := kv.clientSeq[op.ClientID]; !ok || seq < op.Seq{
-				kv.clientSeq[op.ClientID] = op.Seq
+			if latest, ok := kv.clientSeq[op.ClientID]; !ok || latest.Seq < op.Seq{
+
 				if op.Op == Get{
 					op.Value = kv.database[op.Key]
-				}else if op.Op == Put {
-					kv.database[op.Key] = op.Value
+					kv.clientSeq[op.ClientID] = &LatestReply{Seq:op.Seq,
+					Reply:GetReply{Value:op.Value}}
+					//DPrintf("GET {}", op.Key , kv.database[op.Key], )
 				}else{
-					kv.database[op.Key] += op.Value
+					kv.clientSeq[op.ClientID] = &LatestReply{Seq:op.Seq,}
+					if op.Op == Put {
+						kv.database[op.Key] = op.Value
+						//DPrintf("PUT {}", op)
+					}else if op.Op == Append {
+						kv.database[op.Key] += op.Value
+						//DPrintf("APPEND {}", op.Key , kv.database[op.Key], )
+					}
 				}
 			}
-			//kv.mu.Unlock()
 
-			fmt.Println("Debug {}", op)
+
+
 			go func() {
 				done <- op
 			}()
